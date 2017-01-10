@@ -3,6 +3,8 @@ package com.binbo_kodakusan
 // In Search of an Understandable Consensus Algorithm
 // https://raft.github.io/raft.pdf
 
+import java.util.concurrent.atomic.AtomicBoolean
+
 import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props}
 import akka.pattern.ask
 import akka.util.Timeout
@@ -13,7 +15,7 @@ import scala.util.Random
 // サーバの設定
 case class ServerSetting(val serverId: SpecificId, var actor: ActorRef)
 
-class MainActor(nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor {
+class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor {
   // 子供Actorを起動
   var as: Vector[ActorRef] = Vector()
   for (i <- 0 until settings.length) {
@@ -66,6 +68,13 @@ class MainActor(nodeCount: Int, messageCount: Int, dispatcher: String, settings:
           println(s"${kv._1} -> ${kv._2.length}")
         }
       }
+      if (map.forall { case (serverId, log) =>
+        log.length == messageCount
+      }) {
+        as.foreach(context.stop(_))
+        context.stop(self)
+        system.terminate
+      }
   }
 }
 
@@ -79,7 +88,14 @@ object Main {
     assert(system.dispatchers.hasDispatcher(dispatcher))
     val settings = (for (i <- 1 to NodeCount) yield ServerSetting(SpecificId(i), null)).toArray
 
-    val actor = system.actorOf(Props(new MainActor(NodeCount, MessageCount, dispatcher, settings)).withDispatcher(dispatcher), name = "main")
-    Thread.sleep(120 * 1000)
+    val actor = system.actorOf(Props(new MainActor(system, NodeCount, MessageCount, dispatcher, settings)).withDispatcher(dispatcher), name = "main")
+    val flag = new AtomicBoolean(false)
+    system.registerOnTermination {
+      flag.set(true);
+    }
+    while (flag.get) {
+      Thread.sleep(1000)
+    }
+    println("[END]")
   }
 }
