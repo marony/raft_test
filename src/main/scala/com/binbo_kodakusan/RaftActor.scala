@@ -1,9 +1,11 @@
 package com.binbo_kodakusan
 
 import akka.actor.{Actor, Cancellable}
+import akka.event.Logging
 import akka.util.Timeout
 import akka.pattern.ask
 import com.github.nscala_time.time.Imports._
+
 import scala.concurrent.ExecutionContext
 import scala.util.Random
 
@@ -15,6 +17,8 @@ object RaftActor {
 class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) extends Actor {
   import scala.concurrent.duration._
   implicit val ec: ExecutionContext = context.system.dispatcher
+
+  val logger = Logging(context.system, classOf[RaftActor])
 
   val electionTimeout = 500
   implicit val timeout = Timeout(electionTimeout milliseconds)
@@ -228,7 +232,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         serverState.commitIndex += 1
         commitRemain
         // FIXME: 過半数がコミットしてから返答する？
-        sender ! ReplyToClient(this.toString)
+        sender ! ReplyToClient(true)
       } else {
         // FIXME: 毎回Actorを検索しないようにする
         if (role != Leader) {
@@ -243,11 +247,11 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
               }
             case _ =>
               log(s"not found leader: ${serverPersistentState.votedFor}")
-              sender ! "ERROR"
+              sender ! ReplyToClient(false)
           }
         } else {
           log(s"not found leader: ${serverPersistentState.votedFor}")
-          sender ! "ERROR"
+          sender ! ReplyToClient(false)
         }
       }
     case r @ AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit) if role == Leader || role == Candidate =>
@@ -337,6 +341,6 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
   }
 
   def log(log: String) = {
-    println(s"${mySetting.serverId}($role)(votedFor=${serverPersistentState.votedFor})(commitIndex=${serverState.commitIndex}, lastApplied=${serverState.lastApplied}): $log")
+    logger.info(s"${mySetting.serverId}($role)(votedFor=${serverPersistentState.votedFor})(commitIndex=${serverState.commitIndex}, lastApplied=${serverState.lastApplied}): $log")
   }
 }

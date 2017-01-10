@@ -12,6 +12,6 @@ case class RequestVote(val term: Term, val candidateId: ServerId, val lastLogInd
 // 返答
 sealed trait Reply
 case class GetLogReply(val serverId: ServerId, val entries: Seq[(Term, Command)]) extends Reply
-case class ReplyToClient(dummy: String) extends Reply
+case class ReplyToClient(ok: Boolean) extends Reply
 case class AppendEntriesReply(val term: Term, val success: Boolean) extends Reply
 case class RequestVoteReply(val term: Term, val voteGranted: Boolean) extends Reply

@@ -6,6 +6,7 @@ package com.binbo_kodakusan
 import java.util.concurrent.atomic.AtomicBoolean
 
 import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props}
+import akka.event.Logging
 import akka.pattern.ask
 import akka.util.Timeout
 
@@ -16,6 +17,8 @@ import scala.util.Random
 case class ServerSetting(val serverId: SpecificId, var actor: ActorRef)
 
 class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor {
+  val logger = Logging(context.system, classOf[RaftActor])
+
   // 子供Actorを起動
   var as: Vector[ActorRef] = Vector()
   for (i <- 0 until settings.length) {
@@ -36,7 +39,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
   for (i <- 1 to messageCount) {
     val f = actor ? RequestFromClient(Command(i.toString))
     f onSuccess {
-      case ReplyToClient(s) => //println(s)
+      case ReplyToClient(s) => //logger.info(s)
     }
     Thread.sleep(rand.nextInt(100))
   }
@@ -50,8 +53,8 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
   var map = Map.empty[ServerId, Array[(Term, Command)]]
 
   def receive = {
-    case ReplyToClient(dummy) => println(s"!!! $dummy")
-    case GetLogReply(serverId, log) => println(s"!!! $serverId, $log")
+    case ReplyToClient(dummy) => logger.info(s"!!! $dummy")
+    case GetLogReply(serverId, log) => logger.info(s"!!! $serverId, $log")
     case Timer() =>
       for (actor <- as) {
         val f = actor ? GetLog()
@@ -62,10 +65,10 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
             }
         }
       }
-      println("---------------------------------------------")
+      logger.info("---------------------------------------------")
       map.synchronized {
         map.foreach { kv =>
-          println(s"${kv._1} -> ${kv._2.length}")
+          logger.info(s"${kv._1} -> ${kv._2.length}")
         }
       }
       if (map.forall { case (serverId, log) =>
@@ -78,13 +81,18 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
   }
 }
 
+class Main {
+}
+
 object Main {
   def main(args: Array[String]): Unit = {
-    val NodeCount = 9
-    val MessageCount = 10000
+    val NodeCount = 3
+    val MessageCount = 1000
     val dispatcher = "akka.actor.my-pinned-dispatcher"
 
     val system = ActorSystem("raft")
+    val logger = Logging(system, classOf[Main])
+
     assert(system.dispatchers.hasDispatcher(dispatcher))
     val settings = (for (i <- 1 to NodeCount) yield ServerSetting(SpecificId(i), null)).toArray
 
@@ -96,6 +104,6 @@ object Main {
     while (flag.get) {
       Thread.sleep(1000)
     }
-    println("[END]")
+    logger.info("[END]")
   }
 }
