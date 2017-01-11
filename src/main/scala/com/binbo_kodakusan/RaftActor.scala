@@ -1,6 +1,6 @@
 package com.binbo_kodakusan
 
-import akka.actor.{Actor, Cancellable}
+import akka.actor.{Actor, ActorLogging, Cancellable, DiagnosticActorLogging}
 import akka.event.Logging
 import akka.util.Timeout
 import akka.pattern.ask
@@ -14,11 +14,9 @@ object RaftActor {
 }
 
 // サーバの代わりにActorでシミュレート
-class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) extends Actor {
+class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) extends Actor with DiagnosticActorLogging {
   import scala.concurrent.duration._
   implicit val ec: ExecutionContext = context.system.dispatcher
-
-  val logger = Logging(context.system, classOf[RaftActor])
 
   val electionTimeout = 500
   implicit val timeout = Timeout(electionTimeout milliseconds)
@@ -48,7 +46,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       // log[lastApplied] to state machine (§5.3)
       serverState.lastApplied += 1
       val entry = serverPersistentState.log(serverState.lastApplied - 1)
-      log(s"commit entry $entry(${serverState.lastApplied})")
+      info(s"commit entry $entry(${serverState.lastApplied})")
     }
   }
 
@@ -56,11 +54,11 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     // If RPC request or response contains term T > currentTerm:
     // set currentTerm = T, convert to follower (§5.1)
     if (term > serverPersistentState.currentTerm) {
-      log(s"my term is old, change to follower")
+      info(s"my term is old, change to follower")
       serverPersistentState.currentTerm = term
-      log(s"role $role -> $Follower")
+      info(s"role $role -> $Follower")
       role = Follower
-      log(s"votedFor1 ${serverPersistentState.votedFor} -> $leaderId")
+      info(s"votedFor1 ${serverPersistentState.votedFor} -> $leaderId")
       serverPersistentState.votedFor = leaderId
       true
     } else
@@ -74,7 +72,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     // - Reset election timer
     // - Send RequestVote RPCs to all other servers
     serverPersistentState.currentTerm = serverPersistentState.currentTerm.nextTerm
-    log(s"votedFor2 ${serverPersistentState.votedFor} -> ${mySetting.serverId}")
+    info(s"votedFor2 ${serverPersistentState.votedFor} -> ${mySetting.serverId}")
     serverPersistentState.votedFor = mySetting.serverId
     electionFrom = DateTime.now
     val lastIndex = serverPersistentState.log.length
@@ -82,18 +80,18 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     var voteCount = 0
     serverSettings.foreach{ s =>
       val actor = s.actor
-      log(s"send RequestVote(to ${s.serverId})(${serverPersistentState.currentTerm}, ${mySetting.serverId}, ${serverPersistentState.currentTerm})")
+      info(s"send RequestVote(to ${s.serverId})(${serverPersistentState.currentTerm}, ${mySetting.serverId}, ${serverPersistentState.currentTerm})")
       val f = actor ? RequestVote(serverPersistentState.currentTerm, mySetting.serverId, lastIndex, serverPersistentState.currentTerm)
       f onSuccess {
         case r @ RequestVoteReply(term, voteGranted) =>
-          log(s"received(from ${s.serverId}): $r")
+          info(s"received(from ${s.serverId}): $r")
           // RequestVoteReply(Others -> Candidate)
           if (voteGranted) {
             voteCount += 1
             if (role == Candidate && voteCount > serverSettings.length / 2) {
-              log(s"role $role -> $Leader")
+              info(s"role $role -> $Leader")
               role = Leader
-              log(s"I am Leader")
+              info(s"I am Leader")
               for (i <- 0 until serverSettings.length) {
                 leaderState.nextIndex(i) = serverPersistentState.log.length + 1
                 leaderState.matchIndex(i) = 0
@@ -131,12 +129,12 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     val prevTerm = if (prevIndex > 0) serverPersistentState.log(prevIndex - 1)._1 else Term(0)
 
     if (sendLog.length > 0)
-      log(s"send AppendEntries(nextIndex=$nextIndex,matchIndex=${leaderState.matchIndex(i)},lastIndex=$lastIndex,prevIndex=$prevIndex,prevTerm=$prevTerm,sendLog=${sendLog.map(_._2.something).mkString(",")}) to ${serverSettings(i)}")
+      info(s"send AppendEntries(nextIndex=$nextIndex,matchIndex=${leaderState.matchIndex(i)},lastIndex=$lastIndex,prevIndex=$prevIndex,prevTerm=$prevTerm,sendLog=${sendLog.map(_._2.something).mkString(",")}) to ${serverSettings(i)}")
     val f = serverSettings(i).actor ? AppendEntries(serverPersistentState.currentTerm, mySetting.serverId, prevIndex, prevTerm, sendLog, serverState.commitIndex)
     f onSuccess {
       case r @ AppendEntriesReply(term, success) if role == Leader =>
         if (sendLog.length > 0)
-          log(s"received: $r")
+          info(s"received: $r")
         // AppendEntriesReply(Followers -> Leader)
         if (success) {
           if (leaderState.matchIndex(i) < lastIndex) {
@@ -159,10 +157,10 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           // RPC from current leader or granting vote to candidate:
           // convert to candidate
           if ((electionFrom to DateTime.now).toDurationMillis > electionTimeout) {
-            log(s"election timeout, change to candidate")
-            log(s"role $role -> $Candidate")
+            info(s"election timeout, change to candidate")
+            info(s"role $role -> $Candidate")
             role = Candidate
-            log(s"votedFor2 ${serverPersistentState.votedFor} -> ${mySetting.serverId}")
+            info(s"votedFor2 ${serverPersistentState.votedFor} -> ${mySetting.serverId}")
             serverPersistentState.votedFor = mySetting.serverId
             electionFrom = DateTime.now
             self ! StartElection()
@@ -170,12 +168,12 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         case Candidate =>
           // If election timeout elapses: start new election
           if ((electionFrom to DateTime.now).toDurationMillis > electionTimeout) {
-            log(s"election timeout, retry to election")
-            log(s"votedFor2 ${serverPersistentState.votedFor} -> $ServerNone")
+            info(s"election timeout, retry to election")
+            info(s"votedFor2 ${serverPersistentState.votedFor} -> $ServerNone")
             serverPersistentState.votedFor = ServerNone
             electionFrom = DateTime.now
             val d = (rand.nextInt(100) * 10) % MaxRandomize
-            log(s"duration = $d milliseconds")
+            info(s"duration = $d milliseconds")
             context.system.scheduler.scheduleOnce(d milliseconds, self, StartElection())
           }
         case Leader =>
@@ -209,22 +207,22 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
               if (n > matchIndex)
                 n = matchIndex
               count += 1
-              log (s"matchIndex=$matchIndex,n=$n,count=$count")
+              info(s"matchIndex=$matchIndex,n=$n,count=$count")
             }
           }
           if (count > serverSettings.length / 2) {
-            log(s"commitIndex: ${serverState.commitIndex} -> $n")
+            info(s"commitIndex: ${serverState.commitIndex} -> $n")
             serverState.commitIndex = n
           }
       }
     case r @ GetLog() =>
-      log(s"received: $r")
+      info(s"received: $r")
       sender ! GetLogReply(mySetting.serverId, serverPersistentState.log)
     case r @ StartElection() if role == Candidate =>
-      log(s"received: $r")
+      info(s"received: $r")
       startElection
     case r @ RequestFromClient(command) =>
-      log(s"received: $r")
+      info(s"received: $r")
       // If command received from client: append entry to local log,
       // respond after entry applied to state machine (§5.3)
       if (role == Leader) {
@@ -239,42 +237,42 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           serverSettings.find(_.serverId == serverPersistentState.votedFor) match {
             case Some(s) =>
               val path = s"/user/main/raftActor-${s.serverId.id}"
-              log(s"-> $path")
+              info(s"-> $path")
               val actor = context.system.actorSelection(path)
               val f = actor ? r
               f onSuccess {
                 case rr@ReplyToClient(dummy) => sender ! rr
               }
             case _ =>
-              log(s"not found leader: ${serverPersistentState.votedFor}")
+              info(s"not found leader: ${serverPersistentState.votedFor}")
               sender ! ReplyToClient(false)
           }
         } else {
-          log(s"not found leader: ${serverPersistentState.votedFor}")
+          info(s"not found leader: ${serverPersistentState.votedFor}")
           sender ! ReplyToClient(false)
         }
       }
     case r @ AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit) if role == Leader || role == Candidate =>
       if (entries.length > 0)
-        log(s"received: $r")
+        info(s"received: $r")
       // AppendEntries(Leader -> Follower)
       electionFrom = DateTime.now
       if (!checkTerm(leaderId, term)) {
         if (term >= serverPersistentState.currentTerm) {
           // If AppendEntries RPC received from new leader: convert to
           // follower
-          log(s"other node is leader, change to follower")
+          info(s"other node is leader, change to follower")
           serverPersistentState.currentTerm = term
-          log(s"role $role -> $Follower")
+          info(s"role $role -> $Follower")
           role = Follower
-          log(s"votedFor3 ${serverPersistentState.votedFor} -> $leaderId")
+          info(s"votedFor3 ${serverPersistentState.votedFor} -> $leaderId")
           serverPersistentState.votedFor = leaderId
         }
       }
       commitRemain
     case r @ AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit) if role == Follower =>
       if (entries.length > 0)
-        log(s"received: $r")
+        info(s"received: $r")
       // AppendEntries(Leader -> Follower)
       electionFrom = DateTime.now
       if (!checkTerm(leaderId, term)) {
@@ -299,7 +297,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             }
             // append any new entries not already in the log
             serverPersistentState.log = serverPersistentState.log :+ entry
-            log(s"appnd entry $entry($index)")
+            info(s"appnd entry $entry($index)")
             index += 1
           }
           // if leaderCommit > commitIndex, set commitIndex =
@@ -331,7 +329,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         // the log with the later term is more up-to-date. If the logs
         // end with the same term, then whichever log is longer is
         // more up-to-date.
-        log(s"votedFor ${serverPersistentState.votedFor} -> $candidateId")
+        info(s"votedFor ${serverPersistentState.votedFor} -> $candidateId")
         serverPersistentState.votedFor = candidateId
         sender ! RequestVoteReply(serverPersistentState.currentTerm, true)
       } else {
@@ -340,7 +338,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       commitRemain
   }
 
-  def log(log: String) = {
-    logger.info(s"${mySetting.serverId}($role)(votedFor=${serverPersistentState.votedFor})(commitIndex=${serverState.commitIndex}, lastApplied=${serverState.lastApplied}): $log")
+  def info(text: String) = {
+    log.info(s"${mySetting.serverId}($role)(votedFor=${serverPersistentState.votedFor})(commitIndex=${serverState.commitIndex}, lastApplied=${serverState.lastApplied}): $text")
   }
 }
