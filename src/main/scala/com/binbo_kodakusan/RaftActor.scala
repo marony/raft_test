@@ -89,6 +89,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     electionFrom = DateTime.now
     val lastIndex = serverPersistentState.log.length
 
+    // FIXME: foreachじゃなくてFutureの戻り値を一気に待ちたい
     var voteCount = 0
     serverSettings.foreach{ s =>
       val actor = s.actor
@@ -141,6 +142,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     assert(prevIndex >= 0)
     val prevTerm = if (prevIndex > 0) serverPersistentState.log(prevIndex - 1)._1 else Term(0)
 
+    // FIXME: 過半数が成功したかの判断をする
     val f = serverSettings(i).actor ? AppendEntries(serverPersistentState.currentTerm, mySetting.serverId, prevIndex, prevTerm, sendLog, serverState.commitIndex)
     f onSuccess {
       case r @ AppendEntriesReply(term, success) if role == Leader =>
@@ -263,11 +265,13 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             case _ =>
               info(s"not found leader1: ${serverPersistentState.votedFor}, $command")
               //sender ! ReplyToClient(false)
+              // FIXME: これだと順序が崩れるので単純にエラーをかえせばいいかも
               context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
           }
         } else {
           info(s"not found leader2: ${serverPersistentState.votedFor}, $command")
           //sender ! ReplyToClient(false)
+          // FIXME: これだと順序が崩れるので単純にエラーをかえせばいいかも
           context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
         }
       }

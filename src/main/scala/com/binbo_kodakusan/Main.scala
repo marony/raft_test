@@ -10,6 +10,7 @@ import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, DiagnosticActorLog
 import akka.event.Logging
 import akka.pattern.ask
 import akka.util.Timeout
+import org.joda.time.DateTime
 
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Random
@@ -51,6 +52,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
     log.info(s"postStop = $this" + Array.fill(40)("-").mkString(""))
   }
 
+  val start = DateTime.now
   var map = Map.empty[ServerId, (Role, ServerId, Array[(Term, Command)])]
 
   def receive = {
@@ -79,11 +81,20 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
         map.foreach { kv =>
           log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3.length})")
         }
+        val flag = (DateTime.now.getMillis - start.getMillis) > 60 * 1000
         if (!map.isEmpty && map.forall { case (serverId, (role, votedFor, log)) =>
-          log.length >= messageCount
+          flag || log.length >= messageCount
         }) {
           map.foreach { kv =>
             log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3.map(_._2.something).mkString(",")})")
+          }
+          for (i <- 1 to messageCount) {
+            map.foreach { kv =>
+              (kv._2._3.find(c => c._2.something == i.toString)) match {
+                case Some(s) => // Ok
+                case None => log.info(s"${kv._1} -> $i")
+              }
+            }
           }
           log.info("children stopping")
           as.foreach(context.stop(_))
