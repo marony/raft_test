@@ -24,7 +24,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
   implicit val t = Timeout(DurationInt(5) seconds)
 
   override val supervisorStrategy =
-    OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 1 millisecond) {
+    OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 1 minute) {
       case _ => Restart
     }
 
@@ -45,7 +45,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
   override def preStart() = {
     log.info(s"preStart = $this" + Array.fill(40)("-").mkString(""))
     scheduler = context.system.scheduler.schedule(0 millisecond, 5 seconds, context.self, Timer())
-    context.system.scheduler.scheduleOnce(1 second, self, SendTest(1))
+    context.system.scheduler.scheduleOnce(5 second, self, SendTest(1))
   }
   override def postStop() = {
     scheduler.cancel()
@@ -53,16 +53,22 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
   }
 
   val start = DateTime.now
-  var map = Map.empty[ServerId, (Role, ServerId, Array[(Term, Command)])]
+  var map = Map.empty[ServerId, (Role, ServerId, Int, Int, Array[(Term, Command)])]
+
+  var successCount = 0
+  var failureCount = 0
 
   def receive = {
     case ReplyToClient(dummy) => log.info(s"!!! $dummy")
-    case GetLogReply(serverId, role, votedFor, log2) => log.info(s"!!! $serverId, $role, $votedFor, $log2")
+    case GetLogReply(serverId, role, votedFor, commitIndex, lastApplied, log2) => log.info(s"!!! $serverId, $role, $votedFor, $commitIndex, $lastApplied, $log2")
     case SendTest(n) =>
       val actor = as(0)
       val f = actor ? RequestFromClient(Command(n.toString))
       f onSuccess {
-        case ReplyToClient(s) => //log.info(s.toString)
+        case ReplyToClient(s) => if (s) successCount += 1 else failureCount += 1
+      }
+      f onFailure {
+        case e => failureCount += 1
       }
       if (n < messageCount)
         context.system.scheduler.scheduleOnce(10 milliseconds, self, SendTest(n + 1))
@@ -70,27 +76,27 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
       for (actor <- as) {
         val f = actor ? GetLog()
         f onSuccess {
-          case GetLogReply(serverId, role, votedFor, log2) =>
+          case GetLogReply(serverId, role, votedFor, commitIndex, lastApplied, log2) =>
             map.synchronized {
-              map = map + (serverId -> (role, votedFor, log2.toArray))
+              map = map + (serverId -> (role, votedFor, commitIndex, lastApplied, log2.toArray))
             }
         }
       }
       log.info("---------------------------------------------")
       map.synchronized {
         map.foreach { kv =>
-          log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3.length})")
+          log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3}, ${kv._2._4}, ${kv._2._5.length})")
         }
-        val flag = (DateTime.now.getMillis - start.getMillis) > 60 * 1000
-        if (!map.isEmpty && map.forall { case (serverId, (role, votedFor, log)) =>
-          flag || log.length >= messageCount
+        val flag = (DateTime.now.getMillis - start.getMillis) > 300 * 1000
+        if (!map.isEmpty && map.forall { case (serverId, (role, votedFor, commitIndex, lastApplied, log)) =>
+          flag || log.length >= messageCount && commitIndex == lastApplied && commitIndex == log.length
         }) {
           map.foreach { kv =>
-            log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3.map(_._2.something).mkString(",")})")
+            log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3}, ${kv._2._4}, ${kv._2._5.map(_._2.something).mkString(",")}(${kv._2._5.length}))")
           }
           for (i <- 1 to messageCount) {
             map.foreach { kv =>
-              (kv._2._3.find(c => c._2.something == i.toString)) match {
+              (kv._2._5.find(c => c._2.something == i.toString)) match {
                 case Some(s) => // Ok
                 case None => log.info(s"${kv._1} -> $i")
               }
@@ -100,6 +106,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
           as.foreach(context.stop(_))
           context.stop(self)
           system.terminate
+          log.info(s"$successCount + $failureCount == $messageCount")
         }
       }
   }

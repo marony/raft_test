@@ -6,7 +6,8 @@ import akka.util.Timeout
 import akka.pattern.ask
 import com.github.nscala_time.time.Imports._
 
-import scala.concurrent.ExecutionContext
+import scala.collection.mutable
+import scala.concurrent.{ExecutionContext, Future}
 import scala.util.Random
 
 object RaftActor {
@@ -40,7 +41,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     // Leaderだった自分が落ちたのでリセット
     if (serverPersistentState.votedFor == mySetting.serverId)
       serverPersistentState.votedFor = ServerNone
-    scheduler = context.system.scheduler.schedule(0 millisecond, 50 milliseconds, context.self, Timer())
+    scheduler = context.system.scheduler.schedule(0 millisecond, 10 milliseconds, context.self, Timer())
   }
   override def postStop() = {
     scheduler.cancel()
@@ -52,7 +53,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
 
   // lastAppliedよりcommitIndexが進んでいたらコミットする(Leader, Candidate, Follower)
   private def commitRemain(): Unit = {
-    while (serverState.commitIndex > serverState.lastApplied) {
+    while (serverState.lastApplied < serverPersistentState.log.length && serverState.commitIndex > serverState.lastApplied) {
       // if commitIndex > lastApplied: increment lastApplied, apply
       // log[lastApplied] to state machine (§5.3)
       serverState.lastApplied += 1
@@ -89,75 +90,77 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     electionFrom = DateTime.now
     val lastIndex = serverPersistentState.log.length
 
-    // FIXME: foreachじゃなくてFutureの戻り値を一気に待ちたい
-    var voteCount = 0
-    serverSettings.foreach{ s =>
+    val fs = serverSettings.map { s =>
       val actor = s.actor
       info(s"send RequestVote(to ${s.serverId})(${serverPersistentState.currentTerm}, ${mySetting.serverId}, ${serverPersistentState.currentTerm})")
-      val f = actor ? RequestVote(serverPersistentState.currentTerm, mySetting.serverId, lastIndex, serverPersistentState.currentTerm)
-      f onSuccess {
-        case r @ RequestVoteReply(term, voteGranted) =>
-          info(s"received(from ${s.serverId}): $r")
-          // RequestVoteReply(Others -> Candidate)
-          if (voteGranted) {
-            voteCount += 1
-            if (role == Candidate && voteCount > serverSettings.length / 2) {
-              info(s"role $role -> $Leader")
-              role = Leader
-              info(s"I am Leader")
-              for (i <- 0 until serverSettings.length) {
-                leaderState.nextIndex(i) = serverPersistentState.log.length + 1
-                leaderState.matchIndex(i) = 0
-              }
-              // Upon election: send initial empty AppendEntries RPCs
-              // (heartbeat) to each server; repeat during idle periods to
-              // prevent election timeouts (§5.2)
-              for (i <- 0 until serverSettings.length) {
-                if (serverSettings(i).serverId != mySetting.serverId)
-                  sendAppendEntries(i)
-              }
-            }
+      (actor ? RequestVote(serverPersistentState.currentTerm, mySetting.serverId, lastIndex, serverPersistentState.currentTerm)).asInstanceOf[Future[RequestVoteReply]]
+    }
+    val f: Future[Seq[RequestVoteReply]] = Future.sequence(fs)
+    f.onSuccess {
+      case rs: Seq[RequestVoteReply] =>
+        // クォーラム(過半数)以上の賛成があるか
+        if (role == Candidate && rs.count(_.voteGranted) > serverSettings.length / 2) {
+          info(s"role $role -> $Leader")
+          role = Leader
+          info(s"I am Leader")
+          for (i <- 0 until serverSettings.length) {
+            leaderState.nextIndex(i) = serverPersistentState.log.length + 1
+            leaderState.matchIndex(i) = 0
           }
-          commitRemain
-      }
+          // Upon election: send initial empty AppendEntries RPCs
+          // (heartbeat) to each server; repeat during idle periods to
+          // prevent election timeouts (§5.2)
+          val f = sendAppendEntries()
+        }
+        commitRemain
     }
   }
 
   // AppendEntries送信(Leader)
-  private def sendAppendEntries(i: Int): Unit = {
+  private def sendAppendEntries(): Future[Seq[Boolean]] = {
     // If last log index ≥ nextIndex for a follower: send
     // AppendEntries RPC with log entries starting at nextIndex
     // - If successful: update nextIndex and matchIndex for
     //   follower (§5.3)
     // - If AppendEntries fails because of log inconsistency:
     //   decrement nextIndex and retry (§5.3)
-    val nextIndex = leaderState.nextIndex(i)
-    assert(nextIndex > 0)
-    val prevNextIndex = nextIndex
-    val lastIndex = serverPersistentState.log.length
-    leaderState.nextIndex(i) = lastIndex + 1
-    val sendLog = serverPersistentState.log.slice(if (nextIndex <= 0) 0 else nextIndex - 1, lastIndex)
+    val fs = serverSettings.zipWithIndex.filter(_._1.serverId != mySetting.serverId).map { s =>
+      val setting = s._1
+      val i = s._2
+      val nextIndex = leaderState.nextIndex(i)
+      assert(nextIndex > 0)
+      val prevNextIndex = nextIndex
+      val lastIndex = serverPersistentState.log.length
+      leaderState.nextIndex(i) = lastIndex + 1
+      val sendLog = serverPersistentState.log.slice(if (nextIndex <= 0) 0 else nextIndex - 1, lastIndex)
 
-    val prevIndex = nextIndex - 1
-    assert(prevIndex >= 0)
-    val prevTerm = if (prevIndex > 0) serverPersistentState.log(prevIndex - 1)._1 else Term(0)
+      val prevIndex = nextIndex - 1
+      assert(prevIndex >= 0)
+      val prevTerm = if (prevIndex > 0) serverPersistentState.log(prevIndex - 1)._1 else Term(0)
 
-    // FIXME: 過半数が成功したかの判断をする
-    val f = serverSettings(i).actor ? AppendEntries(serverPersistentState.currentTerm, mySetting.serverId, prevIndex, prevTerm, sendLog, serverState.commitIndex)
-    f onSuccess {
-      case r @ AppendEntriesReply(term, success) if role == Leader =>
-        // AppendEntriesReply(Followers -> Leader)
-        if (success) {
-          if (leaderState.matchIndex(i) < lastIndex) {
-            leaderState.matchIndex(i) = lastIndex
+//      if (sendLog.length > 0) {
+//        val start = if (sendLog.length > 0) sendLog(0) else -1
+//        val end = if (sendLog.length > 0) sendLog(sendLog.length - 1) else -1
+//        log.info(s"sendAppendEntries: nextIndex = $nextIndex, $start -> $end")
+//      }
+      val f = setting.actor ? AppendEntries(serverPersistentState.currentTerm, mySetting.serverId, prevIndex, prevTerm, sendLog, serverState.commitIndex)
+      f onSuccess {
+        case r @ AppendEntriesReply(term, success) if role == Leader =>
+          // AppendEntriesReply(Followers -> Leader)
+          if (success) {
+            if (leaderState.matchIndex(i) < lastIndex) {
+              leaderState.matchIndex(i) = lastIndex
+            }
+          } else {
+            // FIXME: retry without Timer
+            if (prevNextIndex > 1)
+              leaderState.nextIndex(i) = prevNextIndex - 1
           }
-        } else {
-          // FIXME: retry without Timer
-          if (prevNextIndex > 1)
-            leaderState.nextIndex(i) = prevNextIndex - 1
-        }
-        commitRemain
+          commitRemain
+      }
+      f.asInstanceOf[Future[AppendEntriesReply]].map(_.success)
     }
+    Future.sequence(fs)
   }
 
   def receive = {
@@ -204,13 +207,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             //   follower (§5.3)
             // - If AppendEntries fails because of log inconsistency:
             //   decrement nextIndex and retry (§5.3)
-            val lastIndex = serverPersistentState.log.length
-            for (i <- 0 until serverSettings.length) {
-              if (serverSettings(i).serverId != mySetting.serverId) {
-                val nextIndex = leaderState.nextIndex(i)
-                sendAppendEntries(i)
-              }
-            }
+            val f = sendAppendEntries()
             // If there exists an N such that N > commitIndex, a majority
             // of matchIndex[i] ≥ N, and log[N].term == currentTerm:
             // set commitIndex = N (§5.3, §5.4).
@@ -227,7 +224,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
                 info(s"matchIndex=$matchIndex,n=$n,count=$count")
               }
             }
-            if (count > serverSettings.length / 2) {
+            // クォーラム(過半数)以上成功したか(自分には送らないので-1)
+            if (count > serverSettings.length / 2 - 1) {
               info(s"commitIndex: ${serverState.commitIndex} -> $n")
               serverState.commitIndex = n
             }
@@ -236,7 +234,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
 
     case r @ GetLog() =>
 //      info(s"received: $r")
-      sender ! GetLogReply(mySetting.serverId, role, serverPersistentState.votedFor, serverPersistentState.log)
+      sender ! GetLogReply(mySetting.serverId, role, serverPersistentState.votedFor, serverState.commitIndex, serverState.lastApplied, serverPersistentState.log)
     case r @ StartElection() if role == Candidate =>
       info(s"received: $r")
       startElection
@@ -246,9 +244,24 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       // respond after entry applied to state machine (§5.3)
       if (role == Leader) {
         serverPersistentState.log = serverPersistentState.log :+ (serverPersistentState.currentTerm, command)
-        serverState.commitIndex += 1
-        commitRemain
-        // FIXME: 過半数がコミットしてから返答する？
+        val f = sendAppendEntries()
+        f onSuccess {
+          case rs: Seq[Boolean] =>
+            // クォーラム(過半数)以上成功したか(自分には送らないので-1)
+            log.info(s"sendAppendEntries: result = ${rs.mkString(",")}")
+            if (rs.count(b => b) > serverSettings.length / 2 - 1) {
+              serverState.commitIndex += 1
+              commitRemain
+              sender ! ReplyToClient(true)
+            } else
+              sender ! ReplyToClient(false)
+        }
+        f onFailure {
+          case x =>
+            // 失敗
+            log.info(s"sendAppendEntries: failure ${x}")
+            sender ! ReplyToClient(false)
+        }
         sender ! ReplyToClient(true)
       } else {
         // FIXME: 毎回Actorを検索しないようにする
