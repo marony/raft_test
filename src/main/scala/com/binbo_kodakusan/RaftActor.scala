@@ -40,6 +40,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
   override def preStart() = scheduler = context.system.scheduler.schedule(0 millisecond, 10 milliseconds, context.self, Timer())
   override def postStop() = scheduler.cancel()
 
+  // lastAppliedよりcommitIndexが進んでいたらコミットする(Leader, Candidate, Follower)
   private def commitRemain(): Unit = {
     while (serverState.commitIndex > serverState.lastApplied) {
       // if commitIndex > lastApplied: increment lastApplied, apply
@@ -50,6 +51,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     }
   }
 
+  // 新しいTermでAppendEntriesを受信したら、Termを変更しFollowerに(Leader, Candidate, Follower)
   private def checkTerm(leaderId: ServerId, term: Term): Boolean = {
     // If RPC request or response contains term T > currentTerm:
     // set currentTerm = T, convert to follower (§5.1)
@@ -65,6 +67,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       false
   }
 
+  // リーダー選出の開始(Candidate)
   private def startElection(): Unit = {
     // On conversion to candidate, start election:
     // - Increment currentTerm
@@ -110,6 +113,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     }
   }
 
+  // AppendEntries送信(Leader)
   private def sendAppendEntries(i: Int): Unit = {
     // If last log index ≥ nextIndex for a follower: send
     // AppendEntries RPC with log entries starting at nextIndex
@@ -278,14 +282,19 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       if (!checkTerm(leaderId, term)) {
         if (term < serverPersistentState.currentTerm) {
           // Reply false if term < currentTerm (§5.1)
+
+          // ログのtermが古い
           sender ! AppendEntriesReply(serverPersistentState.currentTerm, false)
         } else if (prevLogIndex > serverPersistentState.log.length ||
           (prevLogIndex > 0 && prevLogIndex <= serverPersistentState.log.length &&
             prevLogTerm != serverPersistentState.log(prevLogIndex - 1)._1)) {
           // Reply false if log doesn’t contain an entry at prevLogIndex
           // whose term matches prevLogTerm (§5.3)
+
+          // prevLogIndexが存在しないか、termが異なっている
           sender ! AppendEntriesReply(serverPersistentState.currentTerm, false)
         } else {
+          // 正常
           var index = prevLogIndex
           entries.foreach { entry =>
             if (index > 0 && index <= serverPersistentState.log.length &&
@@ -302,6 +311,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           }
           // if leaderCommit > commitIndex, set commitIndex =
           // min(leaderCommit, index of last new entry)
+
+          // LeaderのcommitIndexを採用する
           val lastIndex = serverPersistentState.log.length
           if (leaderCommit > serverState.commitIndex)
             serverState.commitIndex = math.min(leaderCommit, lastIndex)
@@ -314,6 +325,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       electionFrom = DateTime.now
       if (term < serverPersistentState.currentTerm) {
         // Reply false if term < currentTerm (§5.1)
+
+        // termが古い
         sender ! RequestVoteReply(serverPersistentState.currentTerm, false)
       } else if ((serverPersistentState.votedFor == ServerNone ||
         serverPersistentState.votedFor == candidateId) &&
@@ -329,6 +342,9 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         // the log with the later term is more up-to-date. If the logs
         // end with the same term, then whichever log is longer is
         // more up-to-date.
+
+        // 初めての選出か、自分が選出したserverIdで
+        // termが新しいか、termは同じでログが多い
         info(s"votedFor ${serverPersistentState.votedFor} -> $candidateId")
         serverPersistentState.votedFor = candidateId
         sender ! RequestVoteReply(serverPersistentState.currentTerm, true)
