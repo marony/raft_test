@@ -5,7 +5,8 @@ package com.binbo_kodakusan
 
 import java.util.concurrent.atomic.AtomicBoolean
 
-import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, Props}
+import akka.actor.SupervisorStrategy._
+import akka.actor.{Actor, ActorRef, ActorSystem, Cancellable, DiagnosticActorLogging, OneForOneStrategy, Props}
 import akka.event.Logging
 import akka.pattern.ask
 import akka.util.Timeout
@@ -16,8 +17,15 @@ import scala.util.Random
 // サーバの設定
 case class ServerSetting(val serverId: SpecificId, var actor: ActorRef)
 
-class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor {
-  val logger = Logging(context.system, classOf[RaftActor])
+class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor with DiagnosticActorLogging {
+  import scala.concurrent.duration._
+  implicit val ec: ExecutionContext = context.dispatcher
+  implicit val t = Timeout(DurationInt(5) seconds)
+
+  override val supervisorStrategy =
+    OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 1 millisecond) {
+      case _ => Restart
+    }
 
   // 子供Actorを起動
   var as: Vector[ActorRef] = Vector()
@@ -28,55 +36,60 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
     as = as :+ actor
   }
 
-  Thread.sleep(3 * 1000)
-
-  import scala.concurrent.duration._
-  implicit val ec: ExecutionContext = context.dispatcher
-  implicit val t = Timeout(DurationInt(5) seconds)
-
   val rand = new Random
-  val actor = as(0)
-  for (i <- 1 to messageCount) {
-    val f = actor ? RequestFromClient(Command(i.toString))
-    f onSuccess {
-      case ReplyToClient(s) => //logger.info(s)
-    }
-    Thread.sleep(rand.nextInt(100))
-  }
 
   private var scheduler: Cancellable = _
 
   // タイマー発行
-  override def preStart() = scheduler = context.system.scheduler.schedule(0 millisecond, 5 seconds, context.self, Timer())
-  override def postStop() = scheduler.cancel()
+  override def preStart() = {
+    log.info(s"preStart = $this" + Array.fill(40)("-").mkString(""))
+    scheduler = context.system.scheduler.schedule(0 millisecond, 5 seconds, context.self, Timer())
+    context.system.scheduler.scheduleOnce(1 second, self, SendTest(1))
+  }
+  override def postStop() = {
+    scheduler.cancel()
+    log.info(s"postStop = $this" + Array.fill(40)("-").mkString(""))
+  }
 
-  var map = Map.empty[ServerId, Array[(Term, Command)]]
+  var map = Map.empty[ServerId, (Role, ServerId, Array[(Term, Command)])]
 
   def receive = {
-    case ReplyToClient(dummy) => logger.info(s"!!! $dummy")
-    case GetLogReply(serverId, log) => logger.info(s"!!! $serverId, $log")
+    case ReplyToClient(dummy) => log.info(s"!!! $dummy")
+    case GetLogReply(serverId, role, votedFor, log2) => log.info(s"!!! $serverId, $role, $votedFor, $log2")
+    case SendTest(n) =>
+      val actor = as(0)
+      val f = actor ? RequestFromClient(Command(n.toString))
+      f onSuccess {
+        case ReplyToClient(s) => //log.info(s.toString)
+      }
+      if (n < messageCount)
+        context.system.scheduler.scheduleOnce(10 milliseconds, self, SendTest(n + 1))
     case Timer() =>
       for (actor <- as) {
         val f = actor ? GetLog()
         f onSuccess {
-          case GetLogReply(serverId, log) =>
+          case GetLogReply(serverId, role, votedFor, log2) =>
             map.synchronized {
-              map = map + (serverId -> log.toArray)
+              map = map + (serverId -> (role, votedFor, log2.toArray))
             }
         }
       }
-      logger.info("---------------------------------------------")
+      log.info("---------------------------------------------")
       map.synchronized {
         map.foreach { kv =>
-          logger.info(s"${kv._1} -> ${kv._2.length}")
+          log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3.length})")
         }
-      }
-      if (map.forall { case (serverId, log) =>
-        log.length == messageCount
-      }) {
-        as.foreach(context.stop(_))
-        context.stop(self)
-        system.terminate
+        if (!map.isEmpty && map.forall { case (serverId, (role, votedFor, log)) =>
+          log.length >= messageCount
+        }) {
+          map.foreach { kv =>
+            log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3.map(_._2.something).mkString(",")})")
+          }
+          log.info("children stopping")
+          as.foreach(context.stop(_))
+          context.stop(self)
+          system.terminate
+        }
       }
   }
 }
