@@ -7,7 +7,7 @@ import akka.pattern.ask
 import com.github.nscala_time.time.Imports._
 
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Random
 
 object RaftActor {
@@ -37,7 +37,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
 
   // タイマー発行
   override def preStart() = {
-    info(s"preStart = $this" + Array.fill(40)("=").mkString(""))
+    debug(s"preStart = $this" + Array.fill(40)("=").mkString(""))
     // Leaderだった自分が落ちたのでリセット
     if (serverPersistentState.votedFor == mySetting.serverId)
       serverPersistentState.votedFor = ServerNone
@@ -48,7 +48,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     RaftActor.map.synchronized {
       RaftActor.map += (mySetting.serverId -> serverPersistentState)
     }
-    info(s"postStop = $this" + Array.fill(40)("=").mkString(""))
+    debug(s"postStop = $this" + Array.fill(40)("=").mkString(""))
   }
 
   // lastAppliedよりcommitIndexが進んでいたらコミットする(Leader, Candidate, Follower)
@@ -111,6 +111,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           // (heartbeat) to each server; repeat during idle periods to
           // prevent election timeouts (§5.2)
           val f = sendAppendEntries()
+          val r = Await.result(f, timeout.duration)
+//          info(s"${r.mkString(",")}")
         }
         commitRemain
     }
@@ -141,12 +143,17 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
 //      if (sendLog.length > 0) {
 //        val start = if (sendLog.length > 0) sendLog(0) else -1
 //        val end = if (sendLog.length > 0) sendLog(sendLog.length - 1) else -1
-//        log.info(s"sendAppendEntries: nextIndex = $nextIndex, $start -> $end")
+//        debug(s"sendAppendEntries(${mySetting.serverId} -> ${setting.serverId}/${setting.actor}): nextIndex = $nextIndex, $start -> $end")
+//        info(s"log = ${serverPersistentState.log.mkString(",")}")
+//        info(s"sendLog = ${sendLog.mkString(",")}")
 //      }
       val f = setting.actor ? AppendEntries(serverPersistentState.currentTerm, mySetting.serverId, prevIndex, prevTerm, sendLog, serverState.commitIndex)
       f onSuccess {
         case r @ AppendEntriesReply(term, success) if role == Leader =>
           // AppendEntriesReply(Followers -> Leader)
+//          {
+//            debug(s"received AppendEntriesReply($role)($term, $success)(from $sender): $r")
+//          }
           if (success) {
             if (leaderState.matchIndex(i) < lastIndex) {
               leaderState.matchIndex(i) = lastIndex
@@ -158,6 +165,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           }
           commitRemain
       }
+//      info(s"Future = $f")
       f.asInstanceOf[Future[AppendEntriesReply]].map(_.success)
     }
     Future.sequence(fs)
@@ -193,7 +201,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
               serverPersistentState.votedFor = ServerNone
               electionFrom = DateTime.now
               val d = (rand.nextInt(100) * 10) % MaxRandomize
-              info(s"duration = $d milliseconds")
+              debug(s"duration = $d milliseconds")
               context.system.scheduler.scheduleOnce(d milliseconds, self, StartElection())
             }
           case Leader =>
@@ -208,6 +216,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             // - If AppendEntries fails because of log inconsistency:
             //   decrement nextIndex and retry (§5.3)
             val f = sendAppendEntries()
+            val r = Await.result(f, timeout.duration)
+//            info(s"${r.mkString(",")}")
             // If there exists an N such that N > commitIndex, a majority
             // of matchIndex[i] ≥ N, and log[N].term == currentTerm:
             // set commitIndex = N (§5.3, §5.4).
@@ -221,12 +231,12 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
                 if (n > matchIndex)
                   n = matchIndex
                 count += 1
-                info(s"matchIndex=$matchIndex,n=$n,count=$count")
+                debug(s"matchIndex=$matchIndex,n=$n,count=$count")
               }
             }
             // クォーラム(過半数)以上成功したか(自分には送らないので-1)
             if (count > serverSettings.length / 2 - 1) {
-              info(s"commitIndex: ${serverState.commitIndex} -> $n")
+              debug(s"commitIndex: ${serverState.commitIndex} -> $n")
               serverState.commitIndex = n
             }
         }
@@ -239,7 +249,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       info(s"received: $r")
       startElection
     case r @ RequestFromClient(command) =>
-      info(s"received: $r")
+//      debug(s"received: $r")
       // If command received from client: append entry to local log,
       // respond after entry applied to state machine (§5.3)
       if (role == Leader) {
@@ -248,7 +258,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         f onSuccess {
           case rs: Seq[Boolean] =>
             // クォーラム(過半数)以上成功したか(自分には送らないので-1)
-            log.info(s"sendAppendEntries: result = ${rs.mkString(",")}")
+//            debug(s"sendAppendEntries1: result = ${rs.mkString(",")}")
             if (rs.count(b => b) > serverSettings.length / 2 - 1) {
               serverState.commitIndex += 1
               commitRemain
@@ -257,9 +267,9 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
               sender ! ReplyToClient(false)
         }
         f onFailure {
-          case x =>
+          case e =>
             // 失敗
-            log.info(s"sendAppendEntries: failure ${x}")
+            error(s"sendAppendEntries2: failure $e, ${e.getStackTrace.map(s => s"${s.getClassName}:${s.getMethodName}(${s.getFileName}/${s.getLineNumber})").mkString(",")}")
             sender ! ReplyToClient(false)
         }
         sender ! ReplyToClient(true)
@@ -276,20 +286,23 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
                 case rr@ReplyToClient(dummy) => sender ! rr
               }
             case _ =>
-              info(s"not found leader1: ${serverPersistentState.votedFor}, $command")
-              //sender ! ReplyToClient(false)
+              error(s"not found leader1: ${serverPersistentState.votedFor}, $command")
+              sender ! ReplyToClient(false)
               // FIXME: これだと順序が崩れるので単純にエラーをかえせばいいかも
-              context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
+              //context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
           }
         } else {
-          info(s"not found leader2: ${serverPersistentState.votedFor}, $command")
-          //sender ! ReplyToClient(false)
+          error(s"not found leader2: ${serverPersistentState.votedFor}, $command")
+          sender ! ReplyToClient(false)
           // FIXME: これだと順序が崩れるので単純にエラーをかえせばいいかも
-          context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
+          //context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
         }
       }
     case r @ AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit) if role == Leader || role == Candidate =>
       // AppendEntries(Leader -> Follower)
+      if (entries.length > 0) {
+        debug(s"received AppendEntries1(${mySetting.serverId})($role)($term, $leaderId, $prevLogIndex, $prevLogTerm, $leaderCommit)(from $sender): $r")
+      }
       electionFrom = DateTime.now
       if (!checkTerm(leaderId, term)) {
         if (term >= serverPersistentState.currentTerm) {
@@ -306,6 +319,10 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       commitRemain
     case r @ AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit) if role == Follower =>
       // AppendEntries(Leader -> Follower)
+//      if (entries.length > 0) {
+//        debug(s"received AppendEntries2(${mySetting.serverId})($role)($term, $leaderId, $prevLogIndex, $prevLogTerm, $leaderCommit)(from $sender): $r")
+//        info(s"clog = ${serverPersistentState.log.mkString(",")}")
+//      }
       electionFrom = DateTime.now
       if (!checkTerm(leaderId, term)) {
         if (term < serverPersistentState.currentTerm) {
@@ -323,7 +340,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           sender ! AppendEntriesReply(serverPersistentState.currentTerm, false)
         } else {
           // 正常
-          var index = prevLogIndex
+          var index = prevLogIndex + 1
           entries.foreach { entry =>
             if (index > 0 && index <= serverPersistentState.log.length &&
               entry._1 != serverPersistentState.log(index - 1)._1) {
@@ -333,6 +350,11 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
               serverPersistentState.log = serverPersistentState.log.take(index - 1)
             }
             // append any new entries not already in the log
+            if (serverPersistentState.log.length > 0 &&
+                serverPersistentState.log(serverPersistentState.log.length - 1)._2.something.toInt + 1 != entry._2.something.toInt) {
+              // 値がおかしい
+              error(s"Invalid value = ${serverPersistentState.log(serverPersistentState.log.length - 1)}, $entry")
+            }
             serverPersistentState.log = serverPersistentState.log :+ entry
             index += 1
           }
@@ -349,6 +371,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       commitRemain
     case r @ RequestVote(term, candidateId, lastLogIndex, lastLogTerm) =>
       // RequestVote(Candidate -> Others)
+      info(s"RequestVote: votedFor = ${serverPersistentState.votedFor}, currentTerm = ${serverPersistentState.currentTerm}, lastLogTerm = $lastLogTerm, logLength = ${serverPersistentState.log.length}, lastLogIndex = $lastLogIndex")
       electionFrom = DateTime.now
       if (term < serverPersistentState.currentTerm) {
         // Reply false if term < currentTerm (§5.1)
@@ -356,10 +379,10 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         // termが古い
         sender ! RequestVoteReply(serverPersistentState.currentTerm, false)
       } else if ((serverPersistentState.votedFor == ServerNone ||
-        serverPersistentState.votedFor == candidateId) &&
-        (serverPersistentState.currentTerm < lastLogTerm ||
-          (serverPersistentState.currentTerm == lastLogTerm &&
-            serverPersistentState.log.length <= lastLogIndex))) {
+                  serverPersistentState.votedFor == candidateId) &&
+                 (serverPersistentState.currentTerm < lastLogTerm ||
+                  (serverPersistentState.currentTerm == lastLogTerm &&
+                   serverPersistentState.log.length <= lastLogIndex))) {
         // if votedFor is null or candidateId, and candidate’s log is at
         // least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
         // §5.4.1
@@ -381,7 +404,13 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       commitRemain
   }
 
+  def debug(text: String) = {
+    log.debug(s"${mySetting.serverId}($role)(${serverState.commitIndex},${serverState.lastApplied}): $text")
+  }
   def info(text: String) = {
     log.info(s"${mySetting.serverId}($role)(${serverState.commitIndex},${serverState.lastApplied}): $text")
+  }
+  def error(text: String) = {
+    log.error(s"${mySetting.serverId}($role)(${serverState.commitIndex},${serverState.lastApplied}): $text")
   }
 }

@@ -65,10 +65,17 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
       val actor = as(0)
       val f = actor ? RequestFromClient(Command(n.toString))
       f onSuccess {
-        case ReplyToClient(s) => if (s) successCount += 1 else failureCount += 1
+        case ReplyToClient(s) =>
+          if (s)
+            successCount += 1
+          else
+            failureCount += 1
+          log.info(s"ReplyToClient: $successCount, $failureCount, $s")
       }
       f onFailure {
-        case e => failureCount += 1
+        case e =>
+          failureCount += 1
+          log.error(s"ReplyToClient: $successCount, $failureCount, $e, ${e.getStackTrace.map(s => s"${s.getClassName}:${s.getMethodName}(${s.getFileName}/${s.getLineNumber})").mkString(",")}")
       }
       if (n < messageCount)
         context.system.scheduler.scheduleOnce(10 milliseconds, self, SendTest(n + 1))
@@ -84,29 +91,53 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
       }
       log.info("---------------------------------------------")
       map.synchronized {
+        // 各サーバの受信内容を出力
         map.foreach { kv =>
           log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3}, ${kv._2._4}, ${kv._2._5.length})")
         }
-        val flag = (DateTime.now.getMillis - start.getMillis) > 300 * 1000
+        // 全データを受信したか一定時間経つまで待つ
+        val flag = (DateTime.now.getMillis - start.getMillis) > 60 * 1000
+        val count = messageCount// - failureCount
         if (!map.isEmpty && map.forall { case (serverId, (role, votedFor, commitIndex, lastApplied, log)) =>
-          flag || log.length >= messageCount && commitIndex == lastApplied && commitIndex == log.length
+          flag || log.length >= count && commitIndex == lastApplied && commitIndex >= count
         }) {
+          // それぞれのサーバの受信内容を出力
           map.foreach { kv =>
             log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3}, ${kv._2._4}, ${kv._2._5.map(_._2.something).mkString(",")}(${kv._2._5.length}))")
           }
+          // 各サーバの受信していないデータと重複して受信したデータを出力
+          var map2 = Map[ServerId, Vector[Int]]()
+          var map3 = Map[ServerId, Map[Int, Int]]()
           for (i <- 1 to messageCount) {
             map.foreach { kv =>
               (kv._2._5.find(c => c._2.something == i.toString)) match {
-                case Some(s) => // Ok
-                case None => log.info(s"${kv._1} -> $i")
+                case Some(s) =>
+                  var v = map3.getOrElse(kv._1, Map(i -> 0))
+                  val c = v.getOrElse(i, 0)
+                  v = v + (i -> (c + 1))
+                  map3 += (kv._1 -> v)
+                case None =>
+                  val v = map2.getOrElse(kv._1, Vector.empty)
+                  map2 += (kv._1 -> (v :+ i))
               }
             }
+          }
+          map2.foreach {
+            case (serverId, v) =>
+              println(s"$serverId: not found -> ${v.mkString(",")}")
+          }
+          map3.foreach {
+            case (serverId, m) =>
+              m.filter{ case (_, c) => c > 1 }.foreach {
+                case (i, c) =>
+                  println(s"$serverId: duplicated -> ${i}, ${c}")
+              }
           }
           log.info("children stopping")
           as.foreach(context.stop(_))
           context.stop(self)
           system.terminate
-          log.info(s"$successCount + $failureCount == $messageCount")
+          log.info(s"$successCount + $failureCount == $messageCount(${successCount + failureCount})")
         }
       }
   }
