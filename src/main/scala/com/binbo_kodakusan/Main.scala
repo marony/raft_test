@@ -148,7 +148,7 @@ class Main {
 
 object Main {
   def main(args: Array[String]): Unit = {
-    val NodeCount = 3
+    val NodeCount = 5
     val MessageCount = 1000
     val dispatcher = "akka.actor.my-pinned-dispatcher"
 

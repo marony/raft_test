@@ -274,28 +274,20 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         }
         sender ! ReplyToClient(true)
       } else {
-        // FIXME: 毎回Actorを検索しないようにする
         if (role != Leader) {
           serverSettings.find(_.serverId == serverPersistentState.votedFor) match {
             case Some(s) =>
-              val path = s"/user/main/raftActor-${s.serverId.id}"
-              info(s"-> $path, $command")
-              val actor = context.system.actorSelection(path)
-              val f = actor ? r
+              val f = s.actor ? r
               f onSuccess {
                 case rr@ReplyToClient(dummy) => sender ! rr
               }
             case _ =>
               error(s"not found leader1: ${serverPersistentState.votedFor}, $command")
               sender ! ReplyToClient(false)
-              // FIXME: これだと順序が崩れるので単純にエラーをかえせばいいかも
-              //context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
           }
         } else {
           error(s"not found leader2: ${serverPersistentState.votedFor}, $command")
           sender ! ReplyToClient(false)
-          // FIXME: これだと順序が崩れるので単純にエラーをかえせばいいかも
-          //context.system.scheduler.scheduleOnce(100 milliseconds, self, r)
         }
       }
     case r @ AppendEntries(term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit) if role == Leader || role == Candidate =>
@@ -324,6 +316,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
 //        info(s"clog = ${serverPersistentState.log.mkString(",")}")
 //      }
       electionFrom = DateTime.now
+      // FIXME: checkTermに関係なく先に進んでいいかも
       if (!checkTerm(leaderId, term)) {
         if (term < serverPersistentState.currentTerm) {
           // Reply false if term < currentTerm (§5.1)
@@ -331,8 +324,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           // ログのtermが古い
           sender ! AppendEntriesReply(serverPersistentState.currentTerm, false)
         } else if (prevLogIndex > serverPersistentState.log.length ||
-          (prevLogIndex > 0 && prevLogIndex <= serverPersistentState.log.length &&
-            prevLogTerm != serverPersistentState.log(prevLogIndex - 1)._1)) {
+                   (prevLogIndex > 0 && prevLogIndex <= serverPersistentState.log.length &&
+                    prevLogTerm != serverPersistentState.log(prevLogIndex - 1)._1)) {
           // Reply false if log doesn’t contain an entry at prevLogIndex
           // whose term matches prevLogTerm (§5.3)
 
