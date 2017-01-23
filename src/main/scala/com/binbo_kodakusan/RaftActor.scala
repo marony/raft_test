@@ -7,7 +7,7 @@ import akka.pattern.ask
 import com.github.nscala_time.time.Imports._
 
 import scala.collection.mutable
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future, TimeoutException}
 import scala.util.Random
 
 object RaftActor {
@@ -19,7 +19,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
   import scala.concurrent.duration._
   implicit val ec: ExecutionContext = context.system.dispatcher
 
-  val electionTimeout = 500
+  val electionTimeout = 2000
   implicit val timeout = Timeout(electionTimeout milliseconds)
   var electionFrom = DateTime.now
   val MaxRandomize = 400
@@ -110,9 +110,17 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
           // Upon election: send initial empty AppendEntries RPCs
           // (heartbeat) to each server; repeat during idle periods to
           // prevent election timeouts (§5.2)
-          val f = sendAppendEntries()
-          val r = Await.result(f, timeout.duration)
-//          info(s"${r.mkString(",")}")
+          var flag = true
+          while (flag) {
+            try {
+              val f = sendAppendEntries()
+              val r = Await.result(f, timeout.duration)
+              flag = false
+//              info(s"${r.mkString(",")}")
+            } catch {
+              case e: TimeoutException => {}
+            }
+          }
         }
         commitRemain
     }
@@ -269,17 +277,19 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
         f onFailure {
           case e =>
             // 失敗
-            error(s"sendAppendEntries2: failure $e, ${e.getStackTrace.map(s => s"${s.getClassName}:${s.getMethodName}(${s.getFileName}/${s.getLineNumber})").mkString(",")}")
             sender ! ReplyToClient(false)
         }
-        sender ! ReplyToClient(true)
       } else {
         if (role != Leader) {
-          serverSettings.find(_.serverId == serverPersistentState.votedFor) match {
+          serverSettings.find(s => s.serverId != mySetting.serverId && s.serverId == serverPersistentState.votedFor) match {
             case Some(s) =>
               val f = s.actor ? r
               f onSuccess {
                 case rr@ReplyToClient(dummy) => sender ! rr
+              }
+              f onFailure {
+                case e =>
+                  sender ! ReplyToClient(false)
               }
             case _ =>
               error(s"not found leader1: ${serverPersistentState.votedFor}, $command")

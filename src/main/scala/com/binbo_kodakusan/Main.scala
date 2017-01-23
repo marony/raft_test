@@ -21,7 +21,7 @@ case class ServerSetting(val serverId: SpecificId, var actor: ActorRef)
 class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor with DiagnosticActorLogging {
   import scala.concurrent.duration._
   implicit val ec: ExecutionContext = context.dispatcher
-  implicit val t = Timeout(DurationInt(5) seconds)
+  implicit val timeout = Timeout(DurationInt(5) seconds)
 
   override val supervisorStrategy =
     OneForOneStrategy(maxNrOfRetries = 10, withinTimeRange = 1 minute) {
@@ -70,12 +70,12 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
             successCount += 1
           else
             failureCount += 1
-          log.info(s"ReplyToClient: $successCount, $failureCount, $s")
+          log.debug(s"A: $s, ReplyToClient: $successCount, $failureCount, $s")
       }
       f onFailure {
         case e =>
           failureCount += 1
-          log.error(s"ReplyToClient: $successCount, $failureCount, $e, ${e.getStackTrace.map(s => s"${s.getClassName}:${s.getMethodName}(${s.getFileName}/${s.getLineNumber})").mkString(",")}")
+//          log.error(s"B: $n, ReplyToClient: $successCount, $failureCount, $e, ${e.getStackTrace.map(s => s"${s.getClassName}:${s.getMethodName}(${s.getFileName}/${s.getLineNumber})").mkString(",")}")
       }
       if (n < messageCount)
         context.system.scheduler.scheduleOnce(10 milliseconds, self, SendTest(n + 1))
@@ -148,7 +148,7 @@ class Main {
 
 object Main {
   def main(args: Array[String]): Unit = {
-    val NodeCount = 5
+    val NodeCount = 3
     val MessageCount = 1000
     val dispatcher = "akka.actor.my-pinned-dispatcher"
 
