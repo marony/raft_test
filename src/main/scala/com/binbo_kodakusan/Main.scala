@@ -18,7 +18,7 @@ import scala.util.Random
 // サーバの設定
 case class ServerSetting(val serverId: SpecificId, var actor: ActorRef)
 
-class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor with DiagnosticActorLogging {
+class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, testTimeout: Int, dispatcher: String, settings: Array[ServerSetting]) extends Actor with DiagnosticActorLogging {
   import scala.concurrent.duration._
   implicit val ec: ExecutionContext = context.dispatcher
   implicit val timeout = Timeout(DurationInt(5) seconds)
@@ -43,13 +43,13 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
 
   // タイマー発行
   override def preStart() = {
-    log.info(s"preStart = $this" + Array.fill(40)("-").mkString(""))
+    log.info(s"preStart = $self" + Array.fill(40)("-").mkString(""))
     scheduler = context.system.scheduler.schedule(0 millisecond, 5 seconds, context.self, Timer())
     context.system.scheduler.scheduleOnce(5 second, self, SendTest(1))
   }
   override def postStop() = {
     scheduler.cancel()
-    log.info(s"postStop = $this" + Array.fill(40)("-").mkString(""))
+    log.info(s"postStop = $self" + Array.fill(40)("-").mkString(""))
   }
 
   val start = DateTime.now
@@ -63,6 +63,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
     case GetLogReply(serverId, role, votedFor, commitIndex, lastApplied, log2) => log.info(s"!!! $serverId, $role, $votedFor, $commitIndex, $lastApplied, $log2")
     case SendTest(n) =>
       val actor = as(0)
+      log.debug(s"sending: from $self to $actor, ${RequestFromClient(Command(n.toString))}")
       val f = actor ? RequestFromClient(Command(n.toString))
       f onSuccess {
         case ReplyToClient(s) =>
@@ -70,7 +71,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
             successCount += 1
           else
             failureCount += 1
-          log.debug(s"A: $s, ReplyToClient: $successCount, $failureCount, $s")
+          log.info(s"A: $s, ReplyToClient: $successCount, $failureCount, $s")
       }
       f onFailure {
         case e =>
@@ -96,7 +97,7 @@ class MainActor(system: ActorSystem, nodeCount: Int, messageCount: Int, dispatch
           log.info(s"${kv._1} -> (${kv._2._1}, ${kv._2._2}, ${kv._2._3}, ${kv._2._4}, ${kv._2._5.length})")
         }
         // 全データを受信したか一定時間経つまで待つ
-        val flag = (DateTime.now.getMillis - start.getMillis) > 60 * 1000
+        val flag = (DateTime.now.getMillis - start.getMillis) > testTimeout
         val count = messageCount// - failureCount
         if (!map.isEmpty && map.forall { case (serverId, (role, votedFor, commitIndex, lastApplied, log)) =>
           flag || log.length >= count && commitIndex == lastApplied && commitIndex >= count
@@ -150,6 +151,7 @@ object Main {
   def main(args: Array[String]): Unit = {
     val NodeCount = 3
     val MessageCount = 1000
+    val TestTimeout = 60 * 1000
     val dispatcher = "akka.actor.my-pinned-dispatcher"
 
     val system = ActorSystem("raft")
@@ -158,7 +160,7 @@ object Main {
     assert(system.dispatchers.hasDispatcher(dispatcher))
     val settings = (for (i <- 1 to NodeCount) yield ServerSetting(SpecificId(i), null)).toArray
 
-    val actor = system.actorOf(Props(new MainActor(system, NodeCount, MessageCount, dispatcher, settings)).withDispatcher(dispatcher), name = "main")
+    val actor = system.actorOf(Props(new MainActor(system, NodeCount, MessageCount, TestTimeout, dispatcher, settings)).withDispatcher(dispatcher), name = "main")
     val flag = new AtomicBoolean(false)
     system.registerOnTermination {
       flag.set(true);
