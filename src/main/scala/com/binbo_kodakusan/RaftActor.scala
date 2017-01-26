@@ -19,10 +19,11 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
   import scala.concurrent.duration._
   implicit val ec: ExecutionContext = context.system.dispatcher
 
-  val electionTimeout = 2000
-  implicit val timeout = Timeout(electionTimeout milliseconds)
+  val ElectionTimeout = 50
+  val MaxRandomize = 25
+  val HeartbeatsInterval = 20
+  implicit val timeout = Timeout(ElectionTimeout milliseconds)
   var electionFrom = DateTime.now
-  val MaxRandomize = 400
 
   val mySetting: ServerSetting = serverSettings(mySettingIndex)
   val rand = new Random
@@ -41,7 +42,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
     // Leaderだった自分が落ちたのでリセット
     if (serverPersistentState.votedFor == mySetting.serverId)
       serverPersistentState.votedFor = ServerNone
-    scheduler = context.system.scheduler.schedule(0 millisecond, 10 milliseconds, context.self, Timer())
+    scheduler = context.system.scheduler.schedule(0 millisecond, HeartbeatsInterval milliseconds, context.self, Timer())
   }
   override def postStop() = {
     scheduler.cancel()
@@ -129,9 +130,8 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
       val i = s._2
       val nextIndex = leaderState.nextIndex(i)
       assert(nextIndex > 0)
-      val prevNextIndex = nextIndex
+//      val prevNextIndex = nextIndex
       val lastIndex = serverPersistentState.log.length
-      leaderState.nextIndex(i) = lastIndex + 1
       val sendLog = serverPersistentState.log.slice(if (nextIndex <= 0) 0 else nextIndex - 1, lastIndex)
 
       val prevIndex = nextIndex - 1
@@ -149,13 +149,15 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             debug(s"received AppendEntriesReply from ${setting.actor} to $self, $r")
           }
           if (success) {
+            leaderState.nextIndex(i) = lastIndex + 1
             if (leaderState.matchIndex(i) < lastIndex) {
               leaderState.matchIndex(i) = lastIndex
             }
           } else {
             // FIXME: retry without Timer
-            if (prevNextIndex > 1)
-              leaderState.nextIndex(i) = prevNextIndex - 1
+            val nextIndex = leaderState.nextIndex(i)
+            error(s"nextIndex decrement: $nextIndex -> ${nextIndex - 1}")
+            leaderState.nextIndex(i) = nextIndex - 1
           }
           commitRemain
       }
@@ -178,7 +180,7 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             // If election timeout elapses without receiving AppendEntries
             // RPC from current leader or granting vote to candidate:
             // convert to candidate
-            if ((electionFrom to DateTime.now).toDurationMillis > electionTimeout) {
+            if ((electionFrom to DateTime.now).toDurationMillis > ElectionTimeout) {
               info(s"election timeout, change to candidate")
               info(s"role $role -> $Candidate")
               role = Candidate
@@ -189,12 +191,12 @@ class RaftActor(mySettingIndex: Int, serverSettings: Array[ServerSetting]) exten
             }
           case Candidate =>
             // If election timeout elapses: start new election
-            if ((electionFrom to DateTime.now).toDurationMillis > electionTimeout) {
+            if ((electionFrom to DateTime.now).toDurationMillis > ElectionTimeout) {
               info(s"election timeout, retry to election")
               info(s"votedFor2 ${serverPersistentState.votedFor} -> $ServerNone")
               serverPersistentState.votedFor = ServerNone
               electionFrom = DateTime.now
-              val d = (rand.nextInt(100) * 10) % MaxRandomize
+              val d = MaxRandomize
               debug(s"duration = $d milliseconds")
               context.system.scheduler.scheduleOnce(d milliseconds, self, StartElection())
             }
